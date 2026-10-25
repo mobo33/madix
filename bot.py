@@ -14,6 +14,11 @@ TRAP_CHANNEL_ID = 1563707951456198686
 ADMIN_ROLE_ID = 1556695504035774605
 BAN_DELETE_SECONDS = 3600  # also remove the last hour of the banned user's messages
 
+# Join to create: joining this voice channel makes a room for the member and moves
+# them in. Rooms are named "<TEMP_PREFIX><member>" and deleted when empty.
+JOIN_TO_CREATE_ID = 1563706992760066118
+TEMP_PREFIX = "🔊 "
+
 # (label, emoji, role id)
 GAME_ROLES = [
     ("Valorant", "🎯", 1563709078935437372),
@@ -96,6 +101,8 @@ class RoleBot(commands.Bot):
         intents.message_content = True  # needed to read "!rolepanel"
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.cleaned_up = False
+        self.temp_channels: set[int] = set()  # rooms the bot made and still tracks
+        self.creating: set[int] = set()  # members whose room is being made right now
 
     async def setup_hook(self):
         self.add_view(RolePanel())
@@ -116,6 +123,7 @@ class RoleBot(commands.Bot):
         self.cleaned_up = True
         for guild in self.guilds:
             await self.clear_slash_commands(guild)
+            await self.adopt_temp_channels(guild)
         print("Ready. Type !rolepanel in your server.", flush=True)
 
     async def on_message(self, message: discord.Message):
@@ -127,6 +135,32 @@ class RoleBot(commands.Bot):
             await ban_writer(message)
             return
         await self.process_commands(message)
+
+    async def adopt_temp_channels(self, guild: discord.Guild):
+        # After a restart: delete empty leftover rooms, keep tracking the busy ones
+        join = guild.get_channel(JOIN_TO_CREATE_ID)
+        if join is None or join.category is None:
+            return
+        for channel in join.category.voice_channels:
+            if channel.id == JOIN_TO_CREATE_ID or not channel.name.startswith(TEMP_PREFIX):
+                continue
+            if channel.members:
+                self.temp_channels.add(channel.id)
+            else:
+                await delete_temp_room(channel)
+
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ):
+        if after.channel is not None and after.channel.id == JOIN_TO_CREATE_ID:
+            await create_temp_room(member, after.channel)
+
+        left = before.channel
+        if left is not None and left.id in self.temp_channels and not left.members:
+            await delete_temp_room(left)
 
 
 client = RoleBot()
@@ -191,6 +225,47 @@ async def ban_writer(message: discord.Message):
             pass
         return
     print(f"Banned {author} ({author.id}) for writing in the trap channel.", flush=True)
+
+
+async def delete_temp_room(channel: discord.VoiceChannel):
+    client.temp_channels.discard(channel.id)
+    try:
+        await channel.delete(reason="Temp voice room is empty")
+    except discord.HTTPException as exc:
+        print(f"Could not delete room {channel.name}: {exc}", flush=True)
+
+
+async def create_temp_room(member: discord.Member, join: discord.VoiceChannel):
+    if member.id in client.creating:
+        return
+    client.creating.add(member.id)
+    try:
+        # Keep the category's permissions and let the owner manage their own room
+        overwrites = dict(join.category.overwrites) if join.category else {}
+        overwrites[member] = discord.PermissionOverwrite(
+            manage_channels=True, move_members=True
+        )
+        room = await member.guild.create_voice_channel(
+            f"{TEMP_PREFIX}{member.display_name}"[:100],
+            category=join.category,
+            overwrites=overwrites,
+            reason=f"Join to create for {member}",
+        )
+        client.temp_channels.add(room.id)
+        try:
+            await member.move_to(room)
+        except discord.HTTPException as exc:
+            # They left already, or the bot is missing Move Members
+            print(f"Could not move {member} into their room: {exc}", flush=True)
+            await delete_temp_room(room)
+    except discord.HTTPException as exc:
+        print(
+            f"Could not create a room for {member}: {exc}. The bot needs "
+            "Manage Channels, Connect and Move Members.",
+            flush=True,
+        )
+    finally:
+        client.creating.discard(member.id)
 
 
 @client.command(name="rolepanel")
