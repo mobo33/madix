@@ -33,6 +33,8 @@ OWNER_PERMISSIONS = (
     "deafen_members",
     "move_members",
 )
+# What @everyone can always do in a room, whatever the join channel or category says
+EVERYONE_PERMISSIONS = ("view_channel", "connect", "speak")
 
 # (label, emoji, role id)
 GAME_ROLES = [
@@ -260,6 +262,20 @@ async def create_temp_room(member: discord.Member, join: discord.VoiceChannel):
         # so the owner only gets what the bot itself has.
         bot_perms = join.permissions_for(member.guild.me)
         overwrites = dict(join.overwrites)
+
+        # Everyone can see, join and talk in every room
+        everyone = member.guild.default_role
+        template = overwrites.get(everyone)
+        open_to_all = (
+            discord.PermissionOverwrite.from_pair(*template.pair())
+            if template is not None
+            else discord.PermissionOverwrite()
+        )
+        open_to_all.update(
+            **{name: True for name in EVERYONE_PERMISSIONS if getattr(bot_perms, name)}
+        )
+        overwrites[everyone] = open_to_all
+
         overwrites[member] = discord.PermissionOverwrite(
             **{name: True for name in OWNER_PERMISSIONS if getattr(bot_perms, name)}
         )
