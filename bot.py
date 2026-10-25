@@ -255,10 +255,11 @@ async def create_temp_room(member: discord.Member, join: discord.VoiceChannel):
         return
     client.creating.add(member.id)
     try:
-        # Keep the category's permissions and give the owner full control of the room.
-        # Discord refuses permissions the bot does not hold, so grant only those.
+        # Copy the join channel's own permissions so every room looks like it, and give
+        # the owner full control. Discord refuses permissions the bot does not hold,
+        # so the owner only gets what the bot itself has.
         bot_perms = join.permissions_for(member.guild.me)
-        overwrites = dict(join.category.overwrites) if join.category else {}
+        overwrites = dict(join.overwrites)
         overwrites[member] = discord.PermissionOverwrite(
             **{name: True for name in OWNER_PERMISSIONS if getattr(bot_perms, name)}
         )
