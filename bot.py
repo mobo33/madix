@@ -2,7 +2,6 @@ import os
 
 import discord
 from aiohttp import web
-from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -83,7 +82,7 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", int(port)).start()
-    print(f"Web server listening on port {port}")
+    print(f"Web server listening on port {port}", flush=True)
 
 
 class RoleBot(commands.Bot):
@@ -91,34 +90,28 @@ class RoleBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True  # needed to read "!rolepanel"
         super().__init__(command_prefix="!", intents=intents, help_command=None)
-        self.synced = False
+        self.cleaned_up = False
 
     async def setup_hook(self):
         self.add_view(RolePanel())
         await start_web_server()
 
-    async def sync_commands(self, guild: discord.Guild):
-        # Syncing per guild makes the command show up instantly
-        self.tree.copy_global_to(guild=guild)
+    async def clear_slash_commands(self, guild: discord.Guild):
+        # /panel was removed: delete any copy of it still registered in the server
+        self.tree.clear_commands(guild=guild)
         try:
             await self.tree.sync(guild=guild)
-        except discord.Forbidden:
-            print(
-                f"Can't register commands in {guild.name}. Re-invite the bot "
-                "with the applications.commands scope."
-            )
+        except discord.HTTPException as exc:
+            print(f"Could not clear slash commands in {guild.name}: {exc}", flush=True)
 
     async def on_ready(self):
-        print(f"Logged in as {self.user} ({self.user.id})")
-        if self.synced:
+        print(f"Logged in as {self.user} ({self.user.id})", flush=True)
+        if self.cleaned_up:
             return
-        self.synced = True
+        self.cleaned_up = True
         for guild in self.guilds:
-            await self.sync_commands(guild)
-        print("Commands ready. Type !rolepanel (or /panel) in your server.")
-
-    async def on_guild_join(self, guild: discord.Guild):
-        await self.sync_commands(guild)
+            await self.clear_slash_commands(guild)
+        print("Ready. Type !rolepanel in your server.", flush=True)
 
 
 client = RoleBot()
@@ -156,14 +149,6 @@ async def post_panel() -> str:
             f"❌ The bot needs View Channel, Send Messages, Embed Links and "
             f"Read Message History in {channel.mention}."
         )
-
-
-@client.tree.command(name="panel", description="Post the Claim ur role panel")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-async def panel(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    await interaction.followup.send(await post_panel(), ephemeral=True)
 
 
 @client.command(name="rolepanel")
