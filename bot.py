@@ -1,4 +1,3 @@
-import asyncio
 import os
 
 import discord
@@ -10,11 +9,10 @@ load_dotenv()
 
 PANEL_CHANNEL_ID = 1563218768534970469
 
-# Anyone can write in the inbox channel; the bot moves each message to a private
-# channel that only the admin role can see.
-INBOX_CHANNEL_ID = 1563707951456198686
+# Trap channel: anyone without the admin role who writes here gets banned.
+TRAP_CHANNEL_ID = 1563707951456198686
 ADMIN_ROLE_ID = 1556695504035774605
-ADMIN_INBOX_NAME = "admin-inbox"
+BAN_DELETE_SECONDS = 3600  # also remove the last hour of the banned user's messages
 
 # (label, emoji, role id)
 GAME_ROLES = [
@@ -122,11 +120,11 @@ class RoleBot(commands.Bot):
 
     async def on_message(self, message: discord.Message):
         if (
-            message.channel.id == INBOX_CHANNEL_ID
+            message.channel.id == TRAP_CHANNEL_ID
             and not message.author.bot
-            and not is_admin(message.author)
+            and not is_exempt(message.author)
         ):
-            await relay_to_admins(message)
+            await ban_writer(message)
             return
         await self.process_commands(message)
 
@@ -168,84 +166,31 @@ async def post_panel() -> str:
         )
 
 
-def is_admin(user: discord.abc.User) -> bool:
-    return isinstance(user, discord.Member) and any(
-        role.id == ADMIN_ROLE_ID for role in user.roles
+def is_exempt(user: discord.abc.User) -> bool:
+    # Admins and the server owner may write in the trap channel
+    return isinstance(user, discord.Member) and (
+        user.id == user.guild.owner_id
+        or any(role.id == ADMIN_ROLE_ID for role in user.roles)
     )
 
 
-inbox_lock = asyncio.Lock()
-
-
-async def get_admin_inbox(guild: discord.Guild) -> discord.TextChannel | None:
-    # Looked up by name so it survives restarts (Render's disk is not persistent)
-    async with inbox_lock:
-        channel = discord.utils.get(guild.text_channels, name=ADMIN_INBOX_NAME)
-        if channel is not None:
-            return channel
-
-        admin_role = guild.get_role(ADMIN_ROLE_ID)
-        if admin_role is None:
-            print(f"Admin role {ADMIN_ROLE_ID} was not found in {guild.name}.", flush=True)
-            return None
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            admin_role: discord.PermissionOverwrite(
-                view_channel=True, send_messages=True, read_message_history=True
-            ),
-            guild.me: discord.PermissionOverwrite(
-                view_channel=True, send_messages=True, embed_links=True, attach_files=True
-            ),
-        }
-        inbox = guild.get_channel(INBOX_CHANNEL_ID)
+async def ban_writer(message: discord.Message):
+    author = message.author
+    try:
+        await message.guild.ban(
+            author,
+            reason="Wrote in the trap channel",
+            delete_message_seconds=BAN_DELETE_SECONDS,
+        )
+    except discord.HTTPException as exc:
+        # Usually Ban Members is missing or the member's top role is above the bot's
+        print(f"Could not ban {author} ({author.id}): {exc}", flush=True)
         try:
-            return await guild.create_text_channel(
-                ADMIN_INBOX_NAME,
-                overwrites=overwrites,
-                category=inbox.category if inbox else None,
-                reason="Admin-only inbox",
-            )
-        except discord.Forbidden:
-            print(
-                f"Can't create #{ADMIN_INBOX_NAME}. Give the bot Manage Channels, "
-                "or create a private channel with that name yourself.",
-                flush=True,
-            )
-            return None
-
-
-async def relay_to_admins(message: discord.Message):
-    inbox = await get_admin_inbox(message.guild)
-    if inbox is None:
-        return  # nowhere to send it, so leave the message alone
-
-    embed = discord.Embed(
-        description=message.content or "*(no text)*",
-        color=discord.Color.blurple(),
-        timestamp=message.created_at,
-    )
-    embed.set_author(
-        name=f"{message.author.display_name} ({message.author.id})",
-        icon_url=message.author.display_avatar.url,
-    )
-    try:
-        files = [await attachment.to_file() for attachment in message.attachments]
-        await inbox.send(embed=embed, files=files)
-    except discord.HTTPException as exc:
-        print(f"Could not forward a message to admins: {exc}", flush=True)
-        return  # never delete a message that was not delivered
-
-    try:
-        await message.delete()  # needs Manage Messages
-    except discord.HTTPException as exc:
-        print(f"Forwarded but could not delete the original: {exc}", flush=True)
+            await message.delete()
+        except discord.HTTPException:
+            pass
         return
-    await message.channel.send(
-        f"✅ {message.author.mention}, your message was sent to the admins.",
-        delete_after=5,
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
+    print(f"Banned {author} ({author.id}) for writing in the trap channel.", flush=True)
 
 
 @client.command(name="rolepanel")
