@@ -18,6 +18,21 @@ BAN_DELETE_SECONDS = 3600  # also remove the last hour of the banned user's mess
 # them in. Rooms are named "<TEMP_PREFIX><member>" and deleted when empty.
 JOIN_TO_CREATE_ID = 1563706992760066118
 TEMP_PREFIX = "🔊 "
+# What the owner can do in their own room (only what the bot itself has is granted)
+OWNER_PERMISSIONS = (
+    "view_channel",
+    "connect",
+    "speak",
+    "stream",
+    "use_voice_activation",
+    "priority_speaker",
+    "create_instant_invite",
+    "manage_channels",
+    "manage_permissions",
+    "mute_members",
+    "deafen_members",
+    "move_members",
+)
 
 # (label, emoji, role id)
 GAME_ROLES = [
@@ -240,10 +255,12 @@ async def create_temp_room(member: discord.Member, join: discord.VoiceChannel):
         return
     client.creating.add(member.id)
     try:
-        # Keep the category's permissions and let the owner manage their own room
+        # Keep the category's permissions and give the owner full control of the room.
+        # Discord refuses permissions the bot does not hold, so grant only those.
+        bot_perms = join.permissions_for(member.guild.me)
         overwrites = dict(join.category.overwrites) if join.category else {}
         overwrites[member] = discord.PermissionOverwrite(
-            manage_channels=True, move_members=True
+            **{name: True for name in OWNER_PERMISSIONS if getattr(bot_perms, name)}
         )
         room = await member.guild.create_voice_channel(
             f"{TEMP_PREFIX}{member.display_name}"[:100],
