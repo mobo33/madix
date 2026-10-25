@@ -1,7 +1,9 @@
 import os
 
 import discord
+from aiohttp import web
 from discord import app_commands
+from discord.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -66,15 +68,34 @@ class RolePanel(discord.ui.View):
             self.add_item(RoleButton(label, emoji, role_id))
 
 
-class RoleBot(discord.Client):
+async def start_web_server():
+    # Render Web Services need an open HTTP port (and a pinger keeps them awake).
+    # Render Background Workers and local runs have no PORT, so nothing starts.
+    port = os.getenv("PORT")
+    if not port:
+        return
+
+    async def health(request: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", int(port)).start()
+    print(f"Web server listening on port {port}")
+
+
+class RoleBot(commands.Bot):
     def __init__(self):
-        # Default intents only: slash commands and buttons need no privileged intent
-        super().__init__(intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
+        intents = discord.Intents.default()
+        intents.message_content = True  # needed to read "!rolepanel"
+        super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.synced = False
 
     async def setup_hook(self):
         self.add_view(RolePanel())
+        await start_web_server()
 
     async def sync_commands(self, guild: discord.Guild):
         # Syncing per guild makes the command show up instantly
@@ -94,7 +115,7 @@ class RoleBot(discord.Client):
         self.synced = True
         for guild in self.guilds:
             await self.sync_commands(guild)
-        print("Commands ready. Type /panel in your server.")
+        print("Commands ready. Type !rolepanel (or /panel) in your server.")
 
     async def on_guild_join(self, guild: discord.Guild):
         await self.sync_commands(guild)
@@ -145,8 +166,37 @@ async def panel(interaction: discord.Interaction):
     await interaction.followup.send(await post_panel(), ephemeral=True)
 
 
+@client.command(name="rolepanel")
+@commands.guild_only()
+@commands.has_permissions(administrator=True)
+async def rolepanel(ctx: commands.Context):
+    result = await post_panel()
+    try:
+        await ctx.message.delete()  # keep the channel clean (needs Manage Messages)
+    except discord.HTTPException:
+        pass
+    await ctx.send(result, delete_after=8)
+
+
+@client.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    # Ignore random "!something" and non-admins silently
+    if isinstance(
+        error,
+        (commands.CommandNotFound, commands.MissingPermissions, commands.NoPrivateMessage),
+    ):
+        return
+    print(f"Command error in !{ctx.command}: {error}")
+
+
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise SystemExit("DISCORD_TOKEN is missing. Put it in the .env file.")
-    client.run(token)
+    try:
+        client.run(token)
+    except discord.PrivilegedIntentsRequired:
+        raise SystemExit(
+            "Message Content Intent is off. Developer Portal > Bot > Privileged "
+            "Gateway Intents > enable MESSAGE CONTENT INTENT, save, then restart."
+        )
